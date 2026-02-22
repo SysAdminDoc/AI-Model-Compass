@@ -9,8 +9,6 @@
 
 > Discover, download, and run local AI models — tailored to your hardware. Zero-config desktop app that auto-detects your GPU, recommends models that fit, and downloads them with one click.
 
-![Screenshot](screenshot.png)
-
 ## Quick Start
 
 ```bash
