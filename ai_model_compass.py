@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AI Model Compass v0.6.0
+AI Model Compass v0.7.0
 Discover, download, and run local AI — tailored to your hardware.
 """
 import sys, os, subprocess, json, platform, shutil, time, traceback, math, re
@@ -25,12 +25,15 @@ from huggingface_hub import hf_hub_download
 import html as html_mod
 import time as _t
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 APP = "AI Model Compass"
 CFG_DIR = Path.home() / ".ai_compass"
 CFG_DIR.mkdir(exist_ok=True)
 CFG_FILE = CFG_DIR / "config.json"
 HIST_FILE = CFG_DIR / "history.json"
+MODELS_CACHE = CFG_DIR / "models.json"
+MODELS_URL = "https://raw.githubusercontent.com/SysAdminDoc/AI-Model-Compass/main/models.json"
+MODELS_BUNDLED = Path(__file__).parent / "models.json"
 
 def _load_cfg():
     try: return json.loads(CFG_FILE.read_text())
@@ -431,80 +434,39 @@ USE_CASES = {
 }
 CATEGORIES = sorted(set(c for uc in USE_CASES.values() for c in uc["cats"]))
 
-MODEL_DB = [
-    {"n":"Qwen3-32B","p":"32B","q":"Q4_K_M","gb":20.5,"ctx":"128K","sc":95,"cat":"General Purpose","lic":"Apache 2.0",
-     "d":"Top-tier open model. Thinking + non-thinking modes, tool use, multilingual. Arena-tested.","tags":["Thinking","MoE-dense","Multilingual","Tool Use"],
-     "bf":"Best overall open model","repo":"unsloth/Qwen3-32B-GGUF","file":"Qwen3-32B-Q4_K_M.gguf"},
-    {"n":"Qwen3-8B","p":"8B","q":"Q4_K_M","gb":5.2,"ctx":"128K","sc":89,"cat":"General Purpose","lic":"Apache 2.0",
-     "d":"Best 8B model. Thinking mode, 128K context, multilingual. Punches way above weight.","tags":["Thinking","Multilingual","Efficient"],
-     "bf":"Best 8B all-rounder","repo":"Qwen/Qwen3-8B-GGUF","file":"Qwen3-8B-Q4_K_M.gguf"},
-    {"n":"Qwen3-4B","p":"4B","q":"Q4_K_M","gb":2.9,"ctx":"128K","sc":82,"cat":"Small / Efficient","lic":"Apache 2.0",
-     "d":"Tiny but capable. Thinking mode in 3GB. Perfect for low VRAM or fast responses.","tags":["Thinking","Tiny","Fast"],
-     "bf":"Best ultra-small model","repo":"Qwen/Qwen3-4B-GGUF","file":"Qwen3-4B-Q4_K_M.gguf"},
-    {"n":"Qwen3-30B-A3B","p":"30B (3B active)","q":"Q4_K_M","gb":18.4,"ctx":"128K","sc":91,"cat":"General Purpose","lic":"Apache 2.0",
-     "d":"MoE: 30B total, only 3B active per token. Near-32B quality at fraction of compute.","tags":["MoE","Thinking","Efficient"],
-     "bf":"Best MoE efficiency","repo":"unsloth/Qwen3-30B-A3B-GGUF","file":"Qwen3-30B-A3B-Q4_K_M.gguf"},
-    {"n":"Qwen3-235B-A22B","p":"235B (22B active)","q":"Q4_K_M","gb":130,"ctx":"128K","sc":97,"cat":"General Purpose","lic":"Apache 2.0",
-     "d":"Largest open model. GPT-4 class. Use 'ollama pull qwen3:235b' (sharded GGUF, multi-file).","tags":["MoE","Frontier","Thinking"],
-     "bf":"Most intelligent open model"},
-    {"n":"DeepSeek-R1-14B","p":"14B","q":"Q4_K_M","gb":8.9,"ctx":"64K","sc":88,"cat":"General Purpose","lic":"MIT",
-     "d":"Distilled reasoning from DeepSeek-R1. Great chain-of-thought, math, logic.","tags":["Reasoning","CoT","Math"],
-     "bf":"Best reasoning at size","repo":"bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF","file":"DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf"},
-    {"n":"Gemma-3-27B","p":"27B","q":"Q4_K_M","gb":17.3,"ctx":"128K","sc":90,"cat":"General Purpose","lic":"Gemma",
-     "d":"Google's best open model. Excellent instruction following and multilingual.","tags":["Google","Multilingual","Instruct"],
-     "bf":"Google's strongest open model","repo":"unsloth/gemma-3-27b-it-GGUF","file":"gemma-3-27b-it-Q4_K_M.gguf"},
-    {"n":"Mistral-Small-24B","p":"24B","q":"Q4_K_M","gb":14.5,"ctx":"32K","sc":87,"cat":"General Purpose","lic":"Apache 2.0",
-     "d":"Mistral's compact powerhouse. Function calling, structured output.","tags":["Function Calling","JSON","Instruct"],
-     "bf":"Best structured output","repo":"bartowski/Mistral-Small-24B-Instruct-2501-GGUF","file":"Mistral-Small-24B-Instruct-2501-Q4_K_M.gguf"},
-    {"n":"Llama-4-Scout","p":"109B (17B active)","q":"Q4_K_M","gb":63.8,"ctx":"512K","sc":89,"cat":"Long Context","lic":"Llama 4",
-     "d":"Meta's MoE with 10M token context. Use 'ollama pull llama4-scout' (sharded GGUF).","tags":["MoE","Long Context","Meta"],
-     "bf":"Longest context window"},
-    {"n":"Qwen2.5-Coder-32B","p":"32B","q":"Q4_K_M","gb":20.3,"ctx":"128K","sc":93,"cat":"Coding","lic":"Apache 2.0",
-     "d":"Top coding model. Beats GPT-4o on coding benchmarks. Full-stack.","tags":["Coding","Full-Stack","128K"],
-     "bf":"Best open code model","repo":"bartowski/Qwen2.5-Coder-32B-Instruct-GGUF","file":"Qwen2.5-Coder-32B-Instruct-Q4_K_M.gguf"},
-    {"n":"Qwen3-Coder-30B-A3B","p":"30B (3B active)","q":"Q4_K_M","gb":18.4,"ctx":"128K","sc":91,"cat":"Coding","lic":"Apache 2.0",
-     "d":"MoE coding specialist. Agentic coding, tool use, thinking mode.","tags":["Coding","MoE","Agentic"],
-     "bf":"Best MoE coder","repo":"unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF","file":"Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"},
-    {"n":"Devstral-Small-24B","p":"24B","q":"Q4_K_M","gb":14.5,"ctx":"128K","sc":88,"cat":"Coding","lic":"Apache 2.0",
-     "d":"Mistral's agentic coding model. SWE-bench leader, tool use.","tags":["Coding","Agentic","SWE-bench"],
-     "bf":"Best agentic coder","repo":"unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF","file":"Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf"},
-    {"n":"Phi-4-Mini","p":"3.8B","q":"Q4_K_M","gb":2.5,"ctx":"128K","sc":83,"cat":"Small / Efficient","lic":"MIT",
-     "d":"Microsoft's tiny powerhouse. Strong reasoning for its size, STEM focus.","tags":["Tiny","STEM","Microsoft"],
-     "bf":"Best tiny STEM model","repo":"MaziyarPanahi/Phi-4-mini-instruct-GGUF","file":"Phi-4-mini-instruct.Q4_K_M.gguf"},
-    {"n":"SmolLM3-3B","p":"3B","q":"Q4_K_M","gb":2.0,"ctx":"128K","sc":79,"cat":"Small / Efficient","lic":"Apache 2.0",
-     "d":"HuggingFace's tiny model. Excellent for constrained hardware.","tags":["Tiny","HuggingFace","Fast"],
-     "bf":"Smallest capable model","repo":"ggml-org/SmolLM3-3B-GGUF","file":"SmolLM3-Q4_K_M.gguf"},
-    {"n":"Qwen3-VL-8B","p":"8B","q":"Q4_K_M","gb":5.6,"ctx":"128K","sc":86,"cat":"Vision","lic":"Apache 2.0",
-     "d":"See and understand images + text. OCR, diagrams, screenshots.","tags":["Vision","OCR","Multimodal"],
-     "bf":"Best vision model at size","repo":"Qwen/Qwen3-VL-8B-Instruct-GGUF","file":"Qwen3VL-8B-Instruct-Q4_K_M.gguf"},
-    {"n":"Functionary-v3.2-8B","p":"8B","q":"Q4_K_M","gb":4.9,"ctx":"8K","sc":84,"cat":"Agents","lic":"MIT",
-     "d":"Purpose-built for function calling and tool use.","tags":["Function Calling","Tools","JSON"],
-     "bf":"Best tool-use model","repo":"bartowski/functionary-small-v3.2-GGUF","file":"functionary-small-v3.2-Q4_K_M.gguf"},
-    {"n":"Dolphin3.0-8B","p":"8B","q":"Q4_K_M","gb":4.9,"ctx":"128K","sc":85,"cat":"Uncensored","lic":"Llama 3.1",
-     "d":"Uncensored Llama 3.1. No refusals, helpful for everything.","tags":["Uncensored","No Refusals","Llama"],
-     "bf":"Best uncensored 8B","repo":"bartowski/Dolphin3.0-Llama3.1-8B-GGUF","file":"Dolphin3.0-Llama3.1-8B-Q4_K_M.gguf"},
-    {"n":"Nous-Hermes-3-8B","p":"8B","q":"Q4_K_M","gb":4.9,"ctx":"128K","sc":84,"cat":"Uncensored","lic":"Llama 3.1",
-     "d":"Nous Research uncensored. Structured output, function calling.","tags":["Uncensored","Structured","Nous"],
-     "bf":"Best uncensored + tools","repo":"bartowski/Hermes-3-Llama-3.1-8B-GGUF","file":"Hermes-3-Llama-3.1-8B-Q4_K_M.gguf"},
-    {"n":"JOSIEFIED-Qwen3-8B","p":"8B","q":"Q4_K_M","gb":5.2,"ctx":"128K","sc":83,"cat":"Uncensored","lic":"Apache 2.0",
-     "d":"Abliterated Qwen3-8B. Safety refusals removed from weights.","tags":["Abliterated","Qwen3","Uncensored"],
-     "bf":"Best abliterated model","repo":"bartowski/Goekdeniz-Guelmez_Josiefied-Qwen3-8B-abliterated-v1-GGUF","file":"Goekdeniz-Guelmez_Josiefied-Qwen3-8B-abliterated-v1-Q4_K_M.gguf"},
-    {"n":"MN-Violet-Lotus-12B","p":"12B","q":"Q4_K_M","gb":7.7,"ctx":"32K","sc":87,"cat":"Roleplay","lic":"CC BY-NC",
-     "d":"Top roleplay model. Rich prose, character consistency, emotional range.","tags":["Roleplay","Creative","Prose"],
-     "bf":"Best RP model","repo":"mradermacher/MN-Violet-Lotus-12B-GGUF","file":"MN-Violet-Lotus-12B.Q4_K_M.gguf"},
-    {"n":"MythoMax-L2-13B","p":"13B","q":"Q4_K_M","gb":7.9,"ctx":"4K","sc":84,"cat":"Roleplay","lic":"Llama 2",
-     "d":"Classic RP model. Tried and true community favorite.","tags":["Roleplay","Classic","Community"],
-     "bf":"Most popular RP model","repo":"TheBloke/MythoMax-L2-13B-GGUF","file":"mythomax-l2-13b.Q4_K_M.gguf"},
-    {"n":"Fimbulvetr-11B-v2","p":"11B","q":"Q4_K_M","gb":6.8,"ctx":"8K","sc":85,"cat":"Roleplay","lic":"Llama 2",
-     "d":"Norse-themed RP model. Excellent at dark fantasy, adventure.","tags":["Roleplay","Fantasy","Adventure"],
-     "bf":"Best fantasy RP","repo":"mradermacher/Fimbulvetr-11B-v2-GGUF","file":"Fimbulvetr-11B-v2.Q4_K_M.gguf"},
-    {"n":"Lumimaid-v0.2-12B","p":"12B","q":"Q4_K_M","gb":7.7,"ctx":"32K","sc":86,"cat":"Roleplay","lic":"CC BY-NC",
-     "d":"ERP-focused model. Detailed, creative, long-form.","tags":["Roleplay","NSFW","Creative"],
-     "bf":"Best ERP model","repo":"bartowski/Lumimaid-v0.2-12B-GGUF","file":"Lumimaid-v0.2-12B-Q4_K_M.gguf"},
-    {"n":"Noromaid-13B","p":"13B","q":"Q4_K_M","gb":7.9,"ctx":"8K","sc":82,"cat":"Roleplay","lic":"Llama 2",
-     "d":"Community RP model with good character consistency.","tags":["Roleplay","Community","NSFW"],
-     "bf":"Solid RP alternative","repo":"TheBloke/Noromaid-13B-v0.1.1-GGUF","file":"noromaid-13b-v0.1.1.Q4_K_M.gguf"},
-]
+def _load_models():
+    """Load model database from cache, then bundled file, in that priority order."""
+    for src in (MODELS_CACHE, MODELS_BUNDLED):
+        try:
+            data = json.loads(src.read_text(encoding="utf-8"))
+            if isinstance(data, list) and data:
+                return data
+        except Exception:
+            continue
+    return []
+
+MODEL_DB = _load_models()
+
+
+class ModelUpdateWorker(QThread):
+    """Background thread: fetch remote models.json, update cache if changed, emit new list."""
+    sig_updated = pyqtSignal(list)
+
+    def run(self):
+        try:
+            resp = requests.get(MODELS_URL, timeout=10)
+            if resp.status_code != 200:
+                return
+            remote_text = resp.text.strip()
+            remote_data = json.loads(remote_text)
+            if not isinstance(remote_data, list) or not remote_data:
+                return
+            local_text = MODELS_CACHE.read_text(encoding="utf-8").strip() if MODELS_CACHE.exists() else ""
+            if remote_text != local_text:
+                MODELS_CACHE.write_text(remote_text, encoding="utf-8")
+                self.sig_updated.emit(remote_data)
+        except Exception:
+            pass
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # WORKER THREADS
@@ -1920,6 +1882,10 @@ class MainWindow(QMainWindow):
         ml.addWidget(sb)
         # Toast parent
         ToastManager.inst().set_parent(cw)
+        # Background model database update
+        self._model_updater = ModelUpdateWorker()
+        self._model_updater.sig_updated.connect(self._on_models_updated)
+        self._model_updater.start()
 
     def _go_page(self, idx):
         self._stack.setCurrentIndex(idx)
@@ -1929,6 +1895,13 @@ class MainWindow(QMainWindow):
         global current_theme; current_theme = n
         QApplication.instance().setStyleSheet(_qss(THEMES[n]))
         cfg = _load_cfg(); cfg["theme"] = n; _save_cfg(cfg)
+
+    def _on_models_updated(self, new_data):
+        global MODEL_DB
+        MODEL_DB = new_data
+        t = T()
+        self._status_lbl.setText(f"<span style='color:{t['tx3']};font-size:11px'>{len(MODEL_DB)} models · {len(BUILTIN_PRESETS)} packs · HF search · Benchmarks · Favorites</span>")
+        toast(f"Model list updated: {len(MODEL_DB)} models", T()['gn'])
 
     def _refresh_hw(self):
         self._hw.__init__()
