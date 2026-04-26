@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AI Model Compass v0.7.0
+AI Model Compass v0.8.0
 Discover, download, and run local AI — tailored to your hardware.
 """
 import sys, os, subprocess, json, platform, shutil, time, traceback, math, re
@@ -25,7 +25,7 @@ from huggingface_hub import hf_hub_download
 import html as html_mod
 import time as _t
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 APP = "AI Model Compass"
 CFG_DIR = Path.home() / ".ai_compass"
 CFG_DIR.mkdir(exist_ok=True)
@@ -204,7 +204,13 @@ class HardwareInfo:
         return "Slow", "rd"
 
     def vram_usage(self, model_gb, ctx_k=8):
-        kv = ctx_k * 0.5 / 1024 * 8; return model_gb + max(0.5, kv)
+        """Full VRAM formula: weights + KV cache + framework overhead.
+        KV cache: ctx_tokens * 0.5/1024 bytes * heads * layers * 2 (approx 0.5KB per 1K ctx).
+        Framework: PyTorch/cuDNN + activations ~ 0.5-1GB.
+        """
+        kv = round(ctx_k * 0.5 / 1024 * 8, 2)  # KB to GB conversion for KV
+        framework = 0.5 if self.vram_gb > 0 else 0.2  # GPU: 0.5GB PyTorch, CPU: 0.2GB
+        return round(model_gb + max(0.5, kv) + framework, 1)
 
     def export_profile(self):
         """One-click system profile for forums/support."""
@@ -726,20 +732,42 @@ class CompareWidget(QFrame):
         self.setStyleSheet(f"QFrame{{background:{t['bg1']};border:1px solid {t['ac']};border-radius:12px;padding:14px;}}")
         lo = QVBoxLayout(self); lo.setSpacing(8)
         lo.addWidget(QLabel(f"<span style='color:{t['ac']};font-size:15px;font-weight:bold'>📊 Side-by-Side Comparison</span>"))
-        tbl = QTableWidget(7, len(models)); tbl.setVerticalHeaderLabels(["Score","Parameters","Size","Context","Speed","Fits?","License"])
+        # Four-axis scoring: Quality, Speed, Fit, Context
+        mx = hw.max_model_gb()
+        axis_data = []
+        for m in models:
+            active_gb = _parse_active_gb(m.get("p",""), m["gb"])
+            toks = hw.estimate_toks(m["gb"], active_gb); lbl, clr = hw.speed_label(toks)
+            fits = m.get("gb",0) <= mx
+            # Normalize axes: Quality (0-100 score), Speed (tok/s, capped at 60), Fit (bool=100 or 0), Context (K tokens, capped at 256)
+            axis_data.append({
+                "model": m["n"],
+                "quality": m["sc"],
+                "speed": min(toks, 60),
+                "fit": 100 if fits else 0,
+                "context": int(m["ctx"].rstrip("K")),
+            })
+        # Build table: row per axis, col per model
+        tbl = QTableWidget(4, len(models))
+        tbl.setVerticalHeaderLabels(["Quality (score)", "Speed (tok/s)", "Fits Hardware", "Context (K)"])
         tbl.setHorizontalHeaderLabels([m["n"] for m in models])
         tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         tbl.verticalHeader().setStyleSheet(f"color:{t['tx2']};font-size:12px;")
-        tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers); tbl.setMaximumHeight(240)
-        mx = hw.max_model_gb()
-        for j, m in enumerate(models):
-            toks = hw.estimate_toks(m["gb"], _parse_active_gb(m.get("p",""), m["gb"])); lbl, clr = hw.speed_label(toks)
-            fits = m.get("gb",0) <= mx
-            vals = [str(m["sc"]), m["p"], f"{m['gb']} GB", m["ctx"], f"~{toks} tok/s ({lbl})",
-                    "✓ Fits" if fits else "⚠ Too large", m["lic"]]
-            colors = [t['ac'], t['tx'], t['tx'], t['tx'], t[clr], t['gn'] if fits else t['rd'], t['tx2']]
-            for i, (v, c) in enumerate(zip(vals, colors)):
-                item = QTableWidgetItem(v); item.setForeground(QColor(c)); tbl.setItem(i, j, item)
+        tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers); tbl.setMaximumHeight(200)
+        for j, d in enumerate(axis_data):
+            # Row 0: Quality (0-100)
+            qual_norm = min(1.0, d["quality"] / 100.0); qual_bar = "#" * int(qual_norm * 10) + "-" * (10 - int(qual_norm * 10))
+            item = QTableWidgetItem(f"{qual_bar} {d['quality']}"); item.setForeground(QColor(t['ac'])); tbl.setItem(0, j, item)
+            # Row 1: Speed (tok/s, bar)
+            speed_norm = d["speed"] / 60.0; speed_bar = "#" * int(speed_norm * 10) + "-" * (10 - int(speed_norm * 10))
+            clr = t['gn'] if d["speed"] >= 20 else t['og'] if d["speed"] >= 10 else t['rd']
+            item = QTableWidgetItem(f"{speed_bar} {d['speed']}"); item.setForeground(QColor(clr)); tbl.setItem(1, j, item)
+            # Row 2: Fits (yes/no)
+            fits_txt = "Y" if d["fit"] > 0 else "N"
+            item = QTableWidgetItem(fits_txt); item.setForeground(QColor(t['gn'] if d["fit"] > 0 else t['rd'])); tbl.setItem(2, j, item)
+            # Row 3: Context
+            ctx_norm = min(1.0, d["context"] / 256.0); ctx_bar = "#" * int(ctx_norm * 10) + "-" * (10 - int(ctx_norm * 10))
+            item = QTableWidgetItem(f"{ctx_bar} {d['context']}K"); item.setForeground(QColor(t['tl'])); tbl.setItem(3, j, item)
         lo.addWidget(tbl)
 
 class ModelCard(QFrame):

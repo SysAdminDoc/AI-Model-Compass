@@ -9,6 +9,9 @@ Zero-config desktop app that matches local LLMs to your hardware, downloads GGUF
 - ✅ **v0.7.0** — Quant upgrade/downgrade hints in ModelCard
 - ✅ **v0.7.0** — Added Granite-3.3-8B (IBM, Apache 2.0) and Phi-4 14B (Microsoft, MIT)
 - ✅ **v0.7.0** — Version strings unified across all files
+- ✅ **v0.8.0** — Added Llama-3.3-70B, DeepSeek-V3 (MoE), Qwen2.5-72B (3 new frontier models)
+- ✅ **v0.8.0** — Four-axis scoring in CompareWidget (Quality/Speed/Fit/Context axes)
+- ✅ **v0.8.0** — Improved KV cache VRAM formula with framework overhead
 
 ## Planned Features
 
