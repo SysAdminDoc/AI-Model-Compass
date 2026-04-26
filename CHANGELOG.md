@@ -2,6 +2,15 @@
 
 All notable changes to AI-Model-Compass will be documented in this file.
 
+## [v0.8.0] - 2025-04-26
+
+- Added: Llama-3.3-70B (Meta, Llama 3.3 license) — frontier open 70B, best-in-class reasoning
+- Added: DeepSeek-V3 (DeepSeek, MIT) — massive 671B MoE, 37B active, Ollama only
+- Added: Qwen2.5-72B (Alibaba, Apache 2.0) — strongest 70B-class, multilingual + reasoning
+- Added: Four-axis scoring in CompareWidget (Quality/Speed/Fit/Context bars vs flat table)
+- Improved: KV cache VRAM formula now includes framework overhead + explicit documentation
+- Model count: 26 → 29 curated models
+
 ## [v0.7.0] - 2025-07-10
 
 - Added: MoE-aware token/s estimation — active params used for speed (VRAM check still uses full size)
