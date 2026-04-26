@@ -188,9 +188,10 @@ class HardwareInfo:
         if self.vram_gb > 0: return round(self.vram_gb * 0.82, 1)
         return round(self.ram_gb * 0.55, 1)
 
-    def estimate_toks(self, model_gb):
+    def estimate_toks(self, model_gb, active_gb=None):
         if model_gb <= 0: return 0
-        raw = self.mem_bw / (model_gb * 1.15)
+        compute_gb = active_gb if active_gb is not None else model_gb
+        raw = self.mem_bw / (compute_gb * 1.15)
         if self.vram_gb == 0 or model_gb > self.vram_gb * 0.95:
             raw = min(raw, self.ram_gb * 0.8)
         return max(1, round(raw))
@@ -446,6 +447,26 @@ def _load_models():
     return []
 
 MODEL_DB = _load_models()
+
+QUANT_QUALITY = {"Q8_0": 4, "Q6_K": 3, "Q5_K_M": 2, "Q4_K_M": 1, "Q3_K_M": 0, "Q2_K": -1}
+
+def _parse_active_gb(p_str, total_gb):
+    """Return active-params GB for MoE models (for speed estimation), else None."""
+    m = re.search(r'\((\d+(?:\.\d+)?)[Bb]\s+active\)', str(p_str))
+    if m:
+        tm = re.search(r'^(\d+(?:\.\d+)?)[Bb]', str(p_str))
+        if tm:
+            ratio = float(m.group(1)) / float(tm.group(1))
+            return round(total_gb * ratio, 2)
+    return None
+
+def _best_quant_for_hw(model, max_gb):
+    """Return (quant_label, gb) for best-quality quant fitting max_gb, or None."""
+    quants = model.get("quants")
+    if not quants: return None
+    fitting = [(q["q"], q["gb"]) for q in quants if q["gb"] <= max_gb]
+    if not fitting: return None
+    return max(fitting, key=lambda x: QUANT_QUALITY.get(x[0], 0))
 
 
 class ModelUpdateWorker(QThread):
@@ -712,7 +733,7 @@ class CompareWidget(QFrame):
         tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers); tbl.setMaximumHeight(240)
         mx = hw.max_model_gb()
         for j, m in enumerate(models):
-            toks = hw.estimate_toks(m["gb"]); lbl, clr = hw.speed_label(toks)
+            toks = hw.estimate_toks(m["gb"], _parse_active_gb(m.get("p",""), m["gb"])); lbl, clr = hw.speed_label(toks)
             fits = m.get("gb",0) <= mx
             vals = [str(m["sc"]), m["p"], f"{m['gb']} GB", m["ctx"], f"~{toks} tok/s ({lbl})",
                     "✓ Fits" if fits else "⚠ Too large", m["lic"]]
@@ -746,13 +767,24 @@ class ModelCard(QFrame):
         sp_parts = [f"{m['p']}", f"{m['q']} ≈ {m['gb']} GB", f"Ctx: {m['ctx']}", m['lic']]
         sp_html = f"<span style='color:{t['tx2']}'> · ".join(sp_parts) + "</span>"
         if hw and show_speed:
-            toks = hw.estimate_toks(m["gb"]); lbl, clr = hw.speed_label(toks)
-            sp_html += f"  <span style='color:{t[clr]};font-weight:bold'>~{toks} tok/s ({lbl})</span>"
+            active_gb = _parse_active_gb(m.get("p",""), m["gb"])
+            toks = hw.estimate_toks(m["gb"], active_gb); lbl, clr = hw.speed_label(toks)
+            moe_tag = f" <span style='color:{t['tl']};font-size:11px'>(MoE)</span>" if active_gb is not None else ""
+            sp_html += f"  <span style='color:{t[clr]};font-weight:bold'>~{toks} tok/s ({lbl})</span>{moe_tag}"
         fit = ""
         if hw:
             mx = hw.max_model_gb()
-            if m.get("gb",0) <= mx: fit = f" <span style='color:{t['gn']}'>✓ Fits</span>"
-            else: fit = f" <span style='color:{t['rd']}'>⚠ {m['gb']}GB exceeds {mx}GB limit</span>"
+            if m.get("gb",0) <= mx:
+                fit = f" <span style='color:{t['gn']}'>✓ Fits</span>"
+                best_q = _best_quant_for_hw(m, mx)
+                if best_q and best_q[0] != m.get("q","Q4_K_M"):
+                    if QUANT_QUALITY.get(best_q[0],0) > QUANT_QUALITY.get(m.get("q","Q4_K_M"),0):
+                        fit += f" <span style='color:{t['tl']}'>↑ {best_q[0]} ({best_q[1]}GB) available</span>"
+            else:
+                fit = f" <span style='color:{t['rd']}'>⚠ {m['gb']}GB exceeds {mx}GB limit</span>"
+                best_q = _best_quant_for_hw(m, mx)
+                if best_q:
+                    fit += f" <span style='color:{t['og']}'>↓ {best_q[0]} ({best_q[1]}GB) fits</span>"
         sp = QLabel(sp_html + fit); sp.setTextFormat(Qt.TextFormat.RichText); sp.setWordWrap(True); sp.setStyleSheet("font-size:12px;"); lo.addWidget(sp)
         d = QLabel(m["d"]); d.setWordWrap(True); d.setStyleSheet(f"color:{t['tx']};font-size:12px;"); lo.addWidget(d)
         r4 = QHBoxLayout(); r4.setSpacing(4)
@@ -868,7 +900,7 @@ class WizardDialog(QDialog):
         if not top:
             self._rec_area.addWidget(QLabel(f"<span style='color:{t['og']}'>No models fit. Check Models after setup.</span>"))
         for i, m in enumerate(top):
-            toks = self._hw.estimate_toks(m["gb"]); lbl, clr = self._hw.speed_label(toks)
+            toks = self._hw.estimate_toks(m["gb"], _parse_active_gb(m.get("p",""), m["gb"])); lbl, clr = self._hw.speed_label(toks)
             frm = QFrame(); frm.setStyleSheet(f"QFrame{{background:{t['bg1']};color:{t['tx']};border:1px solid {t['gn'] if i==0 else t['bd']};border-radius:10px;padding:12px;}}")
             fl = QVBoxLayout(frm); prefix = "⭐ TOP PICK — " if i == 0 else ""
             fl.addWidget(QLabel(f"<span style='color:{t['ac']};font-size:14px;font-weight:bold'>{prefix}{m['n']}</span>"))
@@ -1543,7 +1575,7 @@ class PresetsPage(QWidget):
             for mn in preset["models"]:
                 m = next((x for x in MODEL_DB if x["n"] == mn), None)
                 if not m: fl.addWidget(QLabel(f"<span style='color:{t['tx3']}'>· {html_mod.escape(mn)} (not in database)</span>")); continue
-                fits = m.get("gb",0) <= mx; toks = hw.estimate_toks(m["gb"]); spd_lbl, spd_clr = hw.speed_label(toks)
+                fits = m.get("gb",0) <= mx; toks = hw.estimate_toks(m["gb"], _parse_active_gb(m.get("p",""), m["gb"])); spd_lbl, spd_clr = hw.speed_label(toks)
                 fc = t['gn'] if fits else t['rd']; fi = "✓ Fits" if fits else "⚠ Too large"
                 row = QHBoxLayout()
                 row.addWidget(QLabel(f"<b>{html_mod.escape(m['n'])}</b> <span style='color:{t['tx2']}'>{m['gb']}GB · {m['p']}</span>"
