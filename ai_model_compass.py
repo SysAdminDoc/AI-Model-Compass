@@ -321,6 +321,29 @@ class SoftwareDetector:
             return True, f"Registered as 'ollama run {model_name}'"
         except Exception as e: return False, str(e)
 
+    def ollama_rename(self, old_name, new_name):
+        """Rename an Ollama model via 'ollama cp' + 'ollama rm' for clean names."""
+        try:
+            subprocess.check_output(["ollama", "cp", old_name, new_name],
+                stderr=subprocess.DEVNULL, timeout=30,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform=="win32" else 0)
+            subprocess.check_output(["ollama", "rm", old_name],
+                stderr=subprocess.DEVNULL, timeout=30,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform=="win32" else 0)
+            return True, f"Renamed '{old_name}' → '{new_name}'"
+        except FileNotFoundError: return False, "Ollama not installed"
+        except subprocess.CalledProcessError as e: return False, f"Rename failed: {e}"
+        except Exception as e: return False, str(e)
+
+    def ollama_list(self):
+        """List locally available Ollama models."""
+        try:
+            resp = requests.get("http://localhost:11434/api/tags", timeout=3)
+            if resp.ok:
+                return [m["name"] for m in resp.json().get("models", [])]
+        except: pass
+        return []
+
     def integrate_lmstudio(self, gguf_path):
         u = os.environ.get("USERNAME", os.environ.get("USER", "user"))
         lm_dir = Path(self.TOOLS["lmstudio"].get("model_dir_win","").replace("{u}",u))
@@ -659,9 +682,15 @@ class BenchWorker(QThread):
             total_tokens = data.get("eval_count", 0)
             eval_dur = data.get("eval_duration", 0) / 1e9
             toks = round(total_tokens / eval_dur, 1) if eval_dur > 0 else 0
-            ttft = round(data.get("prompt_eval_duration", 0) / 1e9, 2)
-            self.sig_done.emit({"tok_s": toks, "tokens": total_tokens, "elapsed": round(elapsed,1),
-                "ttft": ttft, "method": "ollama", "model": self.model_path})
+            # Prefill (prompt eval) tok/s
+            prompt_tokens = data.get("prompt_eval_count", 0)
+            prompt_dur = data.get("prompt_eval_duration", 0) / 1e9
+            prefill_toks = round(prompt_tokens / prompt_dur, 1) if prompt_dur > 0 else 0
+            ttft = round(prompt_dur, 2)
+            self.sig_done.emit({"tok_s": toks, "prefill_tok_s": prefill_toks,
+                "tokens": total_tokens, "prompt_tokens": prompt_tokens,
+                "elapsed": round(elapsed,1), "ttft": ttft,
+                "method": "ollama", "model": self.model_path})
         except requests.exceptions.ConnectionError:
             self.sig_err.emit("Cannot connect to Ollama. Run 'ollama serve' first, then load a model.")
         except Exception as e: self.sig_err.emit(str(e))
@@ -1273,7 +1302,24 @@ class DownloadsPage(QWidget):
         sr.addStretch(); lo.addLayout(sr)
         self._install_log = QLabel(""); self._install_log.setWordWrap(True)
         self._install_log.setStyleSheet(f"color:{t['tx2']};font-size:12px;"); self._install_log.setVisible(False)
-        lo.addWidget(self._install_log); lo.addStretch()
+        lo.addWidget(self._install_log)
+        # Ollama rename helper
+        if sw.is_installed("ollama"):
+            lo.addWidget(QLabel(f"<span style='font-size:14px;font-weight:bold;color:{t['ac']}'>Ollama Rename</span>"))
+            lo.addWidget(QLabel(f"<span style='color:{t['tx2']};font-size:12px'>Rename Ollama models for cleaner names (uses ollama cp + rm).</span>"))
+            ren_row = QHBoxLayout(); ren_row.setSpacing(8)
+            self._ren_old = QComboBox(); self._ren_old.setPlaceholderText("Current name"); self._ren_old.setFixedHeight(34); self._ren_old.setEditable(True)
+            self._ren_old.setMinimumWidth(200); ren_row.addWidget(self._ren_old)
+            ren_row.addWidget(QLabel("→"))
+            self._ren_new = QLineEdit(); self._ren_new.setPlaceholderText("New name (e.g., my-qwen3)"); self._ren_new.setFixedHeight(34); ren_row.addWidget(self._ren_new)
+            ren_btn = QPushButton("🔄 Rename"); ren_btn.setProperty("class","ghost"); ren_btn.setFixedHeight(34)
+            ren_btn.clicked.connect(self._do_rename); ren_row.addWidget(ren_btn)
+            ref_btn2 = QPushButton("↻"); ref_btn2.setProperty("class","ghost"); ref_btn2.setFixedSize(34,34)
+            ref_btn2.setToolTip("Refresh Ollama model list"); ref_btn2.clicked.connect(self._refresh_ollama_list)
+            ren_row.addWidget(ref_btn2); ren_row.addStretch()
+            lo.addLayout(ren_row)
+            self._refresh_ollama_list()
+        lo.addStretch()
         # Connect queue signals
         dl_queue.sig_started.connect(self._on_q_started)
         dl_queue.sig_finished.connect(self._on_q_finished)
@@ -1427,6 +1473,23 @@ class DownloadsPage(QWidget):
             self._install_log.setText(f"<span style='color:{t['rd']}'>❌ {html_mod.escape(msg)}</span>")
             if btn: btn.setEnabled(True); btn.setText(f"{info.get('icon','')} {info.get('name','')}")
 
+    def _refresh_ollama_list(self):
+        models = self._sw.ollama_list()
+        if hasattr(self, '_ren_old'):
+            self._ren_old.clear()
+            self._ren_old.addItems(models)
+
+    def _do_rename(self):
+        old = self._ren_old.currentText().strip()
+        new = self._ren_new.text().strip()
+        if not old or not new:
+            toast("Enter both current and new model names.", T()['og']); return
+        ok, msg = self._sw.ollama_rename(old, new)
+        if ok:
+            toast(f"✅ {msg}", T()['gn']); self._refresh_ollama_list()
+        else:
+            toast(f"❌ {msg}", T()['rd'])
+
 class HFSearchPage(QWidget):
     sig_dl = pyqtSignal(dict)
     def __init__(self, hw):
@@ -1512,7 +1575,7 @@ class HFSearchPage(QWidget):
 
 class BenchmarkPage(QWidget):
     def __init__(self, hw, sw):
-        super().__init__(); self._hw = hw; self._sw = sw; self._worker = None; t = T()
+        super().__init__(); self._hw = hw; self._sw = sw; self._worker = None; self._last_result = None; self._baseline = None; t = T()
         lo = QVBoxLayout(self); lo.setContentsMargins(20,16,20,12); lo.setSpacing(12)
         lo.addWidget(QLabel(f"<span style='font-size:18px;font-weight:bold;color:{t['ac']}'>⚡ Benchmark</span>"))
         lo.addWidget(QLabel(f"<span style='color:{t['tx2']}'>Measure actual tok/s on YOUR hardware. Requires Ollama running.</span>"))
@@ -1535,17 +1598,29 @@ class BenchmarkPage(QWidget):
         self._result_lbl = QLabel("Run a benchmark to see results."); self._result_lbl.setWordWrap(True)
         self._result_lbl.setTextFormat(Qt.TextFormat.RichText); rfl.addWidget(self._result_lbl)
         lo.addWidget(self._result_frame)
+        # Compare mode: pin a baseline
+        cmp_row = QHBoxLayout()
+        self._baseline = None
+        self._pin_btn = QPushButton("📌 Pin as Baseline"); self._pin_btn.setProperty("class","ghost"); self._pin_btn.setFixedHeight(30)
+        self._pin_btn.clicked.connect(self._pin_baseline); self._pin_btn.setEnabled(False)
+        cmp_row.addWidget(self._pin_btn)
+        self._clear_btn = QPushButton("✕ Clear Baseline"); self._clear_btn.setProperty("class","ghost"); self._clear_btn.setFixedHeight(30)
+        self._clear_btn.clicked.connect(self._clear_baseline); self._clear_btn.setVisible(False)
+        cmp_row.addWidget(self._clear_btn)
+        self._baseline_lbl = QLabel(""); self._baseline_lbl.setStyleSheet(f"color:{t['tx3']};font-size:11px;")
+        cmp_row.addWidget(self._baseline_lbl); cmp_row.addStretch()
+        lo.addLayout(cmp_row)
         # Chart + History side by side
         lo.addWidget(QLabel(f"<span style='font-size:14px;font-weight:bold;color:{t['ac']}'>Benchmark History</span>"))
         split = QHBoxLayout()
         # Chart
         self._chart = BenchChart([]); split.addWidget(self._chart, 1)
-        # Table
-        self._hist_tbl = QTableWidget(0, 5)
-        self._hist_tbl.setHorizontalHeaderLabels(["Model","tok/s","TTFT","Tokens","Date"])
+        # Table — now 7 cols with prefill/decode split
+        self._hist_tbl = QTableWidget(0, 7)
+        self._hist_tbl.setHorizontalHeaderLabels(["Model","Decode t/s","Prefill t/s","TTFT","Tokens","vs Base","Date"])
         self._hist_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._hist_tbl.verticalHeader().setVisible(False); self._hist_tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._hist_tbl.setMaximumHeight(200); split.addWidget(self._hist_tbl, 1)
+        self._hist_tbl.setMaximumHeight(220); split.addWidget(self._hist_tbl, 1)
         lo.addLayout(split); lo.addStretch(); self._load_hist()
 
     def _check_ollama(self):
@@ -1569,20 +1644,48 @@ class BenchmarkPage(QWidget):
         self._worker = BenchWorker(model, "ollama", self._prompt.text())
         self._worker.sig_done.connect(self._on_done); self._worker.sig_err.connect(self._on_err); self._worker.start()
 
+    def _pin_baseline(self):
+        if self._last_result:
+            self._baseline = self._last_result.copy()
+            t = T()
+            self._baseline_lbl.setText(f"<span style='color:{t['tl']}'>Baseline: {self._baseline['model']} @ {self._baseline['tok_s']} tok/s</span>")
+            self._clear_btn.setVisible(True)
+            toast(f"📌 Baseline pinned: {self._baseline['model']} @ {self._baseline['tok_s']} tok/s")
+            self._load_hist()
+
+    def _clear_baseline(self):
+        self._baseline = None; self._baseline_lbl.setText(""); self._clear_btn.setVisible(False)
+        toast("Baseline cleared"); self._load_hist()
+
     def _on_done(self, r):
         t = T(); self._run_btn.setEnabled(True); self._run_btn.setText("⚡ Run Benchmark")
+        self._last_result = r; self._pin_btn.setEnabled(True)
         toks = r["tok_s"]; lbl, clr = self._hw.speed_label(toks)
+        prefill = r.get("prefill_tok_s", 0)
+        # Compare against baseline
+        cmp_html = ""
+        if self._baseline:
+            base_toks = self._baseline["tok_s"]
+            if base_toks > 0:
+                diff = toks - base_toks; pct = round((diff / base_toks) * 100, 1)
+                dc = t['gn'] if diff >= 0 else t['rd']; sign = "+" if diff >= 0 else ""
+                cmp_html = (f"<tr><td style='color:{t['tx2']}'>vs Baseline</td>"
+                    f"<td style='color:{dc};font-weight:bold'>{sign}{diff:.1f} tok/s ({sign}{pct}%)</td></tr>"
+                    f"<tr><td style='color:{t['tx2']}'>Baseline</td>"
+                    f"<td style='color:{t['tx3']}'>{self._baseline['model']} @ {base_toks} tok/s</td></tr>")
         self._result_lbl.setText(
             f"<div style='text-align:center;margin:8px 0'>"
             f"<span style='font-size:36px;font-weight:bold;color:{t[clr]}'>{toks} tok/s</span><br>"
             f"<span style='font-size:16px;color:{t[clr]}'>{lbl}</span></div>"
             f"<table style='width:100%'>"
             f"<tr><td style='color:{t['tx2']}'>Model</td><td style='font-weight:bold'>{html_mod.escape(r['model'])}</td></tr>"
-            f"<tr><td style='color:{t['tx2']}'>Tokens</td><td>{r['tokens']}</td></tr>"
+            f"<tr><td style='color:{t['tx2']}'>Decode</td><td style='color:{t['gn']};font-weight:bold'>{toks} tok/s</td></tr>"
+            f"<tr><td style='color:{t['tx2']}'>Prefill</td><td style='color:{t['tl']}'>{prefill} tok/s ({r.get('prompt_tokens',0)} tokens)</td></tr>"
             f"<tr><td style='color:{t['tx2']}'>TTFT</td><td>{r['ttft']}s</td></tr>"
-            f"<tr><td style='color:{t['tx2']}'>Total</td><td>{r['elapsed']}s</td></tr></table>")
+            f"<tr><td style='color:{t['tx2']}'>Total</td><td>{r['elapsed']}s</td></tr>"
+            f"{cmp_html}</table>")
         h = self._get_hist()
-        h.append({"model":r["model"],"tok_s":toks,"ttft":r["ttft"],"tokens":r["tokens"],"date":time.strftime("%Y-%m-%d %H:%M")})
+        h.append({"model":r["model"],"tok_s":toks,"prefill_tok_s":prefill,"ttft":r["ttft"],"tokens":r["tokens"],"date":time.strftime("%Y-%m-%d %H:%M")})
         self._save_hist(h); self._load_hist()
         toast(f"⚡ {r['model']}: {toks} tok/s ({lbl})", t[clr])
 
@@ -1597,13 +1700,23 @@ class BenchmarkPage(QWidget):
     def _load_hist(self):
         t = T(); h = self._get_hist()
         self._hist_tbl.setRowCount(len(h))
+        base_toks = self._baseline["tok_s"] if self._baseline else 0
         for i, e in enumerate(reversed(h)):
             toks = e.get("tok_s", 0); _, clr = self._hw.speed_label(toks)
+            prefill = e.get("prefill_tok_s", 0)
             self._hist_tbl.setItem(i, 0, QTableWidgetItem(e.get("model","")))
             ti = QTableWidgetItem(f"{toks}"); ti.setForeground(QColor(t[clr])); self._hist_tbl.setItem(i, 1, ti)
-            self._hist_tbl.setItem(i, 2, QTableWidgetItem(f"{e.get('ttft',0)}s"))
-            self._hist_tbl.setItem(i, 3, QTableWidgetItem(str(e.get("tokens",0))))
-            self._hist_tbl.setItem(i, 4, QTableWidgetItem(e.get("date","")))
+            pi = QTableWidgetItem(f"{prefill}" if prefill else "-"); pi.setForeground(QColor(t['tl'])); self._hist_tbl.setItem(i, 2, pi)
+            self._hist_tbl.setItem(i, 3, QTableWidgetItem(f"{e.get('ttft',0)}s"))
+            self._hist_tbl.setItem(i, 4, QTableWidgetItem(str(e.get("tokens",0))))
+            # Compare vs baseline
+            if base_toks > 0 and toks > 0:
+                diff = toks - base_toks; pct = round((diff / base_toks) * 100, 1); sign = "+" if diff >= 0 else ""
+                ci = QTableWidgetItem(f"{sign}{pct}%"); ci.setForeground(QColor(t['gn'] if diff >= 0 else t['rd']))
+                self._hist_tbl.setItem(i, 5, ci)
+            else:
+                self._hist_tbl.setItem(i, 5, QTableWidgetItem("-"))
+            self._hist_tbl.setItem(i, 6, QTableWidgetItem(e.get("date","")))
         # Update chart
         chart_data = [{"model": e.get("model",""), "tok_s": e.get("tok_s",0)} for e in h[-8:]]
         lo = self._chart.parent().layout() if self._chart.parent() else None
