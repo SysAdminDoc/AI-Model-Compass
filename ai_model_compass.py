@@ -288,6 +288,14 @@ class SoftwareDetector:
             "win":[r"C:\Users\{u}\AppData\Local\Jan\Jan.exe"],
             "url":"https://jan.ai/download","home":"https://jan.ai",
             "desc":"ChatGPT-style local+cloud.","icon":"⚪","winget":"Jan.Jan"},
+        "docker_model_runner": {"name":"Docker Model Runner","cmd":"docker model list",
+            "win":[],"url":"https://docs.docker.com/desktop/features/model-runner/",
+            "home":"https://docs.docker.com/desktop/","desc":"Run AI models as Docker containers.",
+            "icon":"🐳","winget":None},
+        "llama_server": {"name":"llama-server","cmd":"llama-server --version",
+            "win":[r"C:\llama.cpp\llama-server.exe",r"C:\Users\{u}\llama.cpp\build\bin\llama-server.exe"],
+            "url":"https://github.com/ggerganov/llama.cpp/releases","home":"https://github.com/ggerganov/llama.cpp",
+            "desc":"llama.cpp HTTP server with OpenAI-compatible API.","icon":"🦙","winget":None},
     }
 
     def __init__(self):
@@ -669,16 +677,32 @@ class HFFilesWorker(QThread):
             self.sig_files.emit(self.repo_id, gguf_files)
         except Exception as e: self.sig_err.emit(str(e))
 
+def _gpu_power_watts():
+    """Read current GPU power draw in watts via nvidia-smi."""
+    for p in ["nvidia-smi", r"C:\Windows\System32\nvidia-smi.exe",
+              r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe"]:
+        try:
+            out = subprocess.check_output([p,"--query-gpu=power.draw","--format=csv,noheader,nounits"],
+                text=True, stderr=subprocess.DEVNULL, timeout=5)
+            return round(float(out.strip().split("\n")[0].strip()), 1)
+        except: continue
+    return 0
+
 class BenchWorker(QThread):
     sig_done = pyqtSignal(dict); sig_err = pyqtSignal(str)
     def __init__(self, model_path, backend, prompt):
         super().__init__(); self.model_path = model_path; self.backend = backend; self.prompt = prompt
     def run(self):
         try:
+            # Sample GPU power before and during inference
+            power_start = _gpu_power_watts()
             start = _t.time()
             resp = requests.post("http://localhost:11434/api/generate",
                 json={"model": self.model_path, "prompt": self.prompt, "stream": False}, timeout=120)
-            elapsed = _t.time() - start; data = resp.json()
+            elapsed = _t.time() - start
+            power_end = _gpu_power_watts()
+            avg_watts = round((power_start + power_end) / 2, 1) if power_start > 0 else 0
+            data = resp.json()
             total_tokens = data.get("eval_count", 0)
             eval_dur = data.get("eval_duration", 0) / 1e9
             toks = round(total_tokens / eval_dur, 1) if eval_dur > 0 else 0
@@ -687,9 +711,12 @@ class BenchWorker(QThread):
             prompt_dur = data.get("prompt_eval_duration", 0) / 1e9
             prefill_toks = round(prompt_tokens / prompt_dur, 1) if prompt_dur > 0 else 0
             ttft = round(prompt_dur, 2)
+            # Energy: watts per 1M tokens
+            watts_per_1m = round(avg_watts / toks * 1e6, 0) if toks > 0 and avg_watts > 0 else 0
             self.sig_done.emit({"tok_s": toks, "prefill_tok_s": prefill_toks,
                 "tokens": total_tokens, "prompt_tokens": prompt_tokens,
                 "elapsed": round(elapsed,1), "ttft": ttft,
+                "avg_watts": avg_watts, "watts_per_1m": watts_per_1m,
                 "method": "ollama", "model": self.model_path})
         except requests.exceptions.ConnectionError:
             self.sig_err.emit("Cannot connect to Ollama. Run 'ollama serve' first, then load a model.")
@@ -1683,7 +1710,8 @@ class BenchmarkPage(QWidget):
             f"<tr><td style='color:{t['tx2']}'>Prefill</td><td style='color:{t['tl']}'>{prefill} tok/s ({r.get('prompt_tokens',0)} tokens)</td></tr>"
             f"<tr><td style='color:{t['tx2']}'>TTFT</td><td>{r['ttft']}s</td></tr>"
             f"<tr><td style='color:{t['tx2']}'>Total</td><td>{r['elapsed']}s</td></tr>"
-            f"{cmp_html}</table>")
+            + (f"<tr><td style='color:{t['tx2']}'>GPU Power</td><td>{r.get('avg_watts',0)}W · {r.get('watts_per_1m',0):.0f}W per 1M tokens</td></tr>" if r.get('avg_watts',0) > 0 else "")
+            + f"{cmp_html}</table>")
         h = self._get_hist()
         h.append({"model":r["model"],"tok_s":toks,"prefill_tok_s":prefill,"ttft":r["ttft"],"tokens":r["tokens"],"date":time.strftime("%Y-%m-%d %H:%M")})
         self._save_hist(h); self._load_hist()
@@ -1927,7 +1955,9 @@ class SoftwarePage(QWidget):
             ("Stability Matrix","Pkg Mgr","All","N/A","⭐⭐⭐⭐⭐","Install all"),
             ("Kokoro TTS","Lib","ONNX","CPU+GPU","⭐⭐⭐⭐","TTS"),
             ("Whisper.cpp","CLI","GGML","CPU+CUDA","⭐⭐⭐⭐","STT"),
-            ("SillyTavern","Web","Via backend","Via backend","⭐⭐⭐⭐","Roleplay")]
+            ("SillyTavern","Web","Via backend","Via backend","⭐⭐⭐⭐","Roleplay"),
+            ("Docker Model Runner","CLI+API","OCI/GGUF","CUDA/CPU","⭐⭐⭐","Containers"),
+            ("llama-server","CLI+API","GGUF","CUDA/Vulkan/CPU","⭐⭐⭐","OpenAI-compat")]
         tbl.setRowCount(len(data))
         for i, row in enumerate(data):
             for j, v in enumerate(row):
