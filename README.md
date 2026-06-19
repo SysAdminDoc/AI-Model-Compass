@@ -1,11 +1,11 @@
 # 🧭 AI Model Compass
 
-![Version](https://img.shields.io/badge/version-0.8.0-blue)
+![Version](https://img.shields.io/badge/version-0.9.0-blue)
 ![Python](https://img.shields.io/badge/Python-3.8+-3776AB?logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-Windows%20|%20Linux-0078D4)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Status](https://img.shields.io/badge/status-active-success)
-![Models](https://img.shields.io/badge/models-29%20curated-orange)
+![Models](https://img.shields.io/badge/models-31%20curated-orange)
 
 > Discover, download, and run local AI models — tailored to your hardware. Zero-config desktop app that auto-detects your GPU, recommends models that fit, and downloads them with one click.
 

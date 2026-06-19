@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AI Model Compass v0.8.0
+AI Model Compass v0.9.0
 Discover, download, and run local AI — tailored to your hardware.
 """
 import sys, os, subprocess, json, platform, shutil, time, traceback, math, re
@@ -25,7 +25,7 @@ from huggingface_hub import hf_hub_download
 import html as html_mod
 import time as _t
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 APP = "AI Model Compass"
 CFG_DIR = Path.home() / ".ai_compass"
 CFG_DIR.mkdir(exist_ok=True)
@@ -106,15 +106,31 @@ class HardwareInfo:
         self.ram_gb = round(psutil.virtual_memory().total / (1024**3), 1)
         self.gpu_name = "No dedicated GPU"; self.vram_gb = 0.0
         self.gpu_vendor = "none"; self.mem_bw = 0
+        self.gpu_count = 1; self.gpus = []  # Multi-GPU: list of {"name":..., "vram_gb":...}
+        self.multi_gpu = False; self.total_vram_gb = 0.0
         self.os_name = f"{platform.system()} {platform.release()}"
         self._detect_cpu(); self._detect_gpu(); self._estimate_bw()
+        self._aggregate_gpus()
 
     def refresh(self):
         """Re-detect all hardware (e.g., after eGPU connect, driver update)."""
         self.gpu_name = "No dedicated GPU"; self.vram_gb = 0.0
         self.gpu_vendor = "none"; self.mem_bw = 0
+        self.gpu_count = 1; self.gpus = []
+        self.multi_gpu = False; self.total_vram_gb = 0.0
         self.ram_gb = round(psutil.virtual_memory().total / (1024**3), 1)
-        self._detect_gpu(); self._estimate_bw()
+        self._detect_gpu(); self._estimate_bw(); self._aggregate_gpus()
+
+    def _aggregate_gpus(self):
+        """Aggregate multi-GPU VRAM for tiled fit calculations."""
+        if len(self.gpus) > 1:
+            self.gpu_count = len(self.gpus)
+            self.multi_gpu = True
+            self.total_vram_gb = round(sum(g["vram_gb"] for g in self.gpus), 1)
+        else:
+            self.gpu_count = 1
+            self.multi_gpu = False
+            self.total_vram_gb = self.vram_gb
 
     def _detect_cpu(self):
         if sys.platform == "win32":
@@ -137,10 +153,21 @@ class HardwareInfo:
             try:
                 out = subprocess.check_output([p,"--query-gpu=name,memory.total","--format=csv,noheader,nounits"],
                     text=True, stderr=subprocess.DEVNULL, timeout=5)
-                parts = out.strip().split(",")
-                if len(parts) >= 2:
-                    self.gpu_name = parts[0].strip(); self.vram_gb = round(int(parts[1].strip())/1024, 1)
-                    self.gpu_vendor = "nvidia"; return
+                gpu_lines = [ln.strip() for ln in out.strip().splitlines() if ln.strip()]
+                if gpu_lines:
+                    # Capture all GPUs for multi-GPU support
+                    self.gpus = []
+                    for ln in gpu_lines:
+                        parts = ln.split(",")
+                        if len(parts) >= 2:
+                            gname = parts[0].strip()
+                            gvram = round(int(parts[1].strip())/1024, 1)
+                            self.gpus.append({"name": gname, "vram_gb": gvram})
+                    if self.gpus:
+                        # Primary GPU is the one with most VRAM
+                        best = max(self.gpus, key=lambda g: g["vram_gb"])
+                        self.gpu_name = best["name"]; self.vram_gb = best["vram_gb"]
+                        self.gpu_vendor = "nvidia"; return
             except: continue
         if sys.platform == "win32":
             try:
@@ -157,6 +184,8 @@ class HardwareInfo:
                     elif any(k in nl for k in ["amd","radeon","rx "]): ven = "amd"
                     elif "arc" in nl: ven = "intel"
                     if ven != "none" and vr >= bv: bn, bv, bven = nm, vr, ven
+                    if ven != "none" and vr > 0:
+                        self.gpus.append({"name": nm, "vram_gb": vr})
                 if bn: self.gpu_name = bn; self.vram_gb = bv; self.gpu_vendor = bven
             except: pass
 
@@ -188,6 +217,12 @@ class HardwareInfo:
         if self.vram_gb > 0: return round(self.vram_gb * 0.82, 1)
         return round(self.ram_gb * 0.55, 1)
 
+    def max_model_gb_multi(self):
+        """Max model size using all GPUs combined (tiled/tensor-parallel)."""
+        if self.multi_gpu:
+            return round(self.total_vram_gb * 0.82, 1)
+        return self.max_model_gb()
+
     def estimate_toks(self, model_gb, active_gb=None):
         if model_gb <= 0: return 0
         compute_gb = active_gb if active_gb is not None else model_gb
@@ -214,11 +249,15 @@ class HardwareInfo:
 
     def export_profile(self):
         """One-click system profile for forums/support."""
+        multi = ""
+        if self.multi_gpu:
+            gpu_list = ", ".join(f"{g['name']} ({g['vram_gb']}GB)" for g in self.gpus)
+            multi = f"\nMulti-GPU: {self.gpu_count}x — {gpu_list}\nTotal VRAM: {self.total_vram_gb} GB\nMax GGUF (multi): ~{self.max_model_gb_multi()} GB"
         return (f"=== {APP} v{VERSION} System Profile ===\n"
                 f"CPU: {self.cpu_name} ({self.cpu_cores}C/{self.cpu_threads}T)\n"
                 f"RAM: {self.ram_gb} GB\nGPU: {self.gpu_name}\nVRAM: {self.vram_gb} GB\n"
                 f"Vendor: {self.gpu_vendor}\nTier: {self.tier_label}\n"
-                f"Bandwidth: ~{self.mem_bw} GB/s\nMax GGUF: ~{self.max_model_gb()} GB\n"
+                f"Bandwidth: ~{self.mem_bw} GB/s\nMax GGUF: ~{self.max_model_gb()} GB{multi}\n"
                 f"OS: {self.os_name}\nPython: {platform.python_version()}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -808,8 +847,14 @@ class ModelCard(QFrame):
                 if best_q and best_q[0] != m.get("q","Q4_K_M"):
                     if QUANT_QUALITY.get(best_q[0],0) > QUANT_QUALITY.get(m.get("q","Q4_K_M"),0):
                         fit += f" <span style='color:{t['tl']}'>↑ {best_q[0]} ({best_q[1]}GB) available</span>"
+            elif hw.multi_gpu and m.get("gb",0) <= hw.max_model_gb_multi():
+                fit = f" <span style='color:{t['pu']}'>✓ Fits ({hw.gpu_count}x GPU tiled)</span>"
             else:
                 fit = f" <span style='color:{t['rd']}'>⚠ {m['gb']}GB exceeds {mx}GB limit</span>"
+                if hw.multi_gpu:
+                    mmx = hw.max_model_gb_multi()
+                    if m.get("gb",0) > mmx:
+                        fit += f" <span style='color:{t['tx3']}'>({hw.total_vram_gb}GB multi-GPU also insufficient)</span>"
                 best_q = _best_quant_for_hw(m, mx)
                 if best_q:
                     fit += f" <span style='color:{t['og']}'>↓ {best_q[0]} ({best_q[1]}GB) fits</span>"
@@ -827,9 +872,10 @@ class ModelCard(QFrame):
             btn = QPushButton("⬇ Download"); btn.setFixedHeight(26); btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setStyleSheet(f"QPushButton{{background:{t['gn']};color:{t['bg0']};font-size:11px;padding:3px 12px;border-radius:6px;font-weight:bold;}}QPushButton:hover{{background:{t['tl']};}}")
             btn.clicked.connect(lambda: self.sig_dl.emit(m)); r4.addWidget(btn)
-        elif m.get("n") in ("Qwen3-235B-A22B","Llama-4-Scout"):
-            # Ollama pull button for sharded models
-            tag = "qwen3:235b" if "235B" in m["n"] else "llama4-scout"
+        elif m.get("n") in ("Qwen3-235B-A22B","Llama-4-Scout","DeepSeek-V3","Mistral-Large-2"):
+            # Ollama pull button for sharded/large models
+            _ollama_tags = {"Qwen3-235B-A22B":"qwen3:235b","Llama-4-Scout":"llama4-scout","DeepSeek-V3":"deepseek-v3","Mistral-Large-2":"mistral-large"}
+            tag = _ollama_tags.get(m["n"], m["n"].lower())
             btn = QPushButton(f"🟢 ollama pull"); btn.setFixedHeight(26); btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setStyleSheet(f"QPushButton{{background:#76b900;color:#000;font-size:11px;padding:3px 12px;border-radius:6px;font-weight:bold;}}QPushButton:hover{{background:#88cc00;}}")
             btn.clicked.connect(lambda _, t=tag: self.sig_dl.emit({"_ollama_pull": t, "n": m["n"]})); r4.addWidget(btn)
@@ -953,12 +999,18 @@ class HomePage(QWidget):
         hl.addWidget(QLabel(f"<span style='font-size:15px;font-weight:bold;color:{t['ac']}'>🖥️ Your Hardware</span>"))
         gc = {"nvidia":"#76b900","amd":"#ED1C24","intel":"#0071C5"}.get(hw.gpu_vendor, t['tx2'])
         vr = f"{hw.vram_gb} GB" if hw.vram_gb > 0 else "N/A"
+        multi_row = ""
+        if hw.multi_gpu:
+            gpu_list = "<br>".join(f"  {html_mod.escape(g['name'])} ({g['vram_gb']}GB)" for g in hw.gpus)
+            multi_row = (f"<tr><td style='color:{t['tx2']}'>GPUs</td><td style='color:{t['pu']};font-weight:bold'>{hw.gpu_count}x — {hw.total_vram_gb} GB total</td></tr>"
+                         f"<tr><td></td><td style='color:{t['tx2']};font-size:11px'>{gpu_list}</td></tr>"
+                         f"<tr><td style='color:{t['tx2']}'>Multi-GPU Max</td><td style='color:{t['tl']};font-weight:bold'>~{hw.max_model_gb_multi()} GB</td></tr>")
         hl.addWidget(QLabel(f"<table width='100%'><tr><td style='color:{t['tx2']};width:80px'>CPU</td><td>{html_mod.escape(hw.cpu_name)}</td></tr>"
             f"<tr><td style='color:{t['tx2']}'>RAM</td><td>{hw.ram_gb} GB</td></tr>"
             f"<tr><td style='color:{t['tx2']}'>GPU</td><td style='color:{gc};font-weight:bold'>{html_mod.escape(hw.gpu_name)}</td></tr>"
             f"<tr><td style='color:{t['tx2']}'>VRAM</td><td style='color:{t['ac']};font-weight:bold'>{vr}</td></tr>"
             f"<tr><td style='color:{t['tx2']}'>Tier</td><td style='color:{t['gn']};font-weight:bold'>{hw.tier_label}</td></tr>"
-            f"<tr><td style='color:{t['tx2']}'>Bandwidth</td><td>{hw.mem_bw} GB/s</td></tr></table>"))
+            f"<tr><td style='color:{t['tx2']}'>Bandwidth</td><td>{hw.mem_bw} GB/s</td></tr>{multi_row}</table>"))
         # Refresh + Export buttons
         br = QHBoxLayout()
         rb = QPushButton("🔄 Refresh"); rb.setProperty("class","ghost"); rb.setFixedHeight(28)
@@ -1015,7 +1067,11 @@ class ModelsPage(QWidget):
         self._se = QLineEdit(); self._se.setPlaceholderText("🔍 Search models, tags, descriptions..."); self._se.setFixedHeight(36); fl.addWidget(self._se, 2)
         self._cf = QComboBox(); self._cf.addItem("All"); self._cf.addItems(CATEGORIES); self._cf.setFixedHeight(36); fl.addWidget(self._cf)
         self._sf = QComboBox(); self._sf.addItems(["Score ↓","Score ↑","Name","Size ↑","Size ↓"]); self._sf.setFixedHeight(36); fl.addWidget(self._sf)
-        self._ff = QCheckBox("Fits my PC"); fl.addWidget(self._ff)
+        self._ff = QPushButton("✓ Fits my rig"); self._ff.setCheckable(True); self._ff.setFixedHeight(36)
+        self._ff.setStyleSheet(f"QPushButton{{background:{t['bg3']};color:{t['tx']};border:1px solid {t['bd']};border-radius:18px;padding:4px 16px;font-weight:bold;font-size:12px;}}"
+            f"QPushButton:checked{{background:{t['gn']};color:{t['bg0']};border-color:{t['gn']};}}"
+            f"QPushButton:hover{{border-color:{t['gn']};}}")
+        self._ff.setToolTip("Show only models that fit your GPU/RAM"); fl.addWidget(self._ff)
         self._cmp_btn = QPushButton("📊 Compare (0)"); self._cmp_btn.setProperty("class","ghost"); self._cmp_btn.setFixedHeight(36)
         self._cmp_btn.clicked.connect(self._show_compare); fl.addWidget(self._cmp_btn)
         lo.addLayout(fl)
@@ -1023,8 +1079,9 @@ class ModelsPage(QWidget):
         sa = QScrollArea(); sa.setWidgetResizable(True); sa.setStyleSheet("QScrollArea{border:none;background:transparent;}")
         self._sw = QWidget(); self._sl = QVBoxLayout(self._sw); self._sl.setSpacing(6); self._sl.setContentsMargins(0,0,6,0)
         sa.setWidget(self._sw); lo.addWidget(sa, 1)
-        for sig in [self._se.textChanged, self._cf.currentIndexChanged, self._sf.currentIndexChanged, self._ff.stateChanged]:
+        for sig in [self._se.textChanged, self._cf.currentIndexChanged, self._sf.currentIndexChanged]:
             sig.connect(self._refresh)
+        self._ff.clicked.connect(self._refresh)
         self._refresh()
 
     def _on_compare(self, m, add):
@@ -1809,6 +1866,111 @@ class GlossaryPage(QWidget):
         self._br.setHtml(_html(f"<p style='color:{t['tx2']}'>{len(ps)} terms</p>{''.join(ps)}", t))
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# COMMAND PALETTE (Ctrl+K)
+# ═══════════════════════════════════════════════════════════════════════════════
+class CommandPalette(QDialog):
+    """Searchable command palette over models, pages, and actions."""
+    sig_navigate = pyqtSignal(int)       # page index
+    sig_download = pyqtSignal(dict)      # model to download
+    sig_action = pyqtSignal(str)         # named action
+
+    def __init__(self, hw, parent=None):
+        super().__init__(parent)
+        self._hw = hw; t = T()
+        self.setWindowTitle("Command Palette")
+        self.setFixedSize(600, 420)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setStyleSheet(f"QDialog{{background:{t['bg0']};border:2px solid {t['ac']};border-radius:14px;}}")
+
+        lo = QVBoxLayout(self); lo.setContentsMargins(12,12,12,12); lo.setSpacing(6)
+        # Search input
+        self._input = QLineEdit()
+        self._input.setPlaceholderText("Type to search models, pages, actions...  (Esc to close)")
+        self._input.setFixedHeight(42)
+        self._input.setStyleSheet(f"QLineEdit{{background:{t['bg1']};color:{t['tx']};border:2px solid {t['ac']};border-radius:10px;padding:8px 14px;font-size:15px;}}")
+        self._input.textChanged.connect(self._filter)
+        lo.addWidget(self._input)
+
+        # Results list
+        self._list = QListWidget()
+        self._list.setStyleSheet(f"""QListWidget{{background:{t['bg1']};border:1px solid {t['bd']};border-radius:8px;outline:none;}}
+            QListWidget::item{{padding:10px 14px;border-bottom:1px solid {t['bd']};color:{t['tx']};font-size:13px;}}
+            QListWidget::item:selected{{background:{t['acs']};color:{t['ac']};font-weight:bold;}}
+            QListWidget::item:hover:!selected{{background:{t['bg2']};}}""")
+        self._list.itemActivated.connect(self._activate)
+        lo.addWidget(self._list, 1)
+
+        # Hint
+        hint = QLabel(f"<span style='color:{t['tx3']};font-size:11px'>Enter to select  ·  Esc to close  ·  Ctrl+K to toggle</span>")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter); lo.addWidget(hint)
+
+        self._build_items()
+        self._filter("")
+        self._input.setFocus()
+
+    def _build_items(self):
+        """Build the full list of searchable items."""
+        self._items = []
+        # Pages
+        pages = [("🏠 Home", 0), ("🗄️ Models", 1), ("🎯 Recommend", 2), ("📦 Packs", 3),
+                 ("🔍 HuggingFace Search", 4), ("⬇ Downloads", 5), ("★ Favorites", 6),
+                 ("🔄 Updates", 7), ("📐 VRAM Calculator", 8), ("⚡ Benchmark", 9),
+                 ("⚙️ Software", 10), ("📖 Learn", 11), ("📚 Glossary", 12)]
+        for label, idx in pages:
+            self._items.append({"type": "page", "label": f"Go to {label}", "detail": "Page", "idx": idx})
+        # Actions
+        actions = [("🔄 Refresh Hardware", "refresh_hw"), ("📋 Copy System Profile", "copy_profile"),
+                   ("🎨 Theme: Obsidian", "theme_obsidian"), ("🎨 Theme: Catppuccin Mocha", "theme_catppuccin"),
+                   ("🎨 Theme: OLED Black", "theme_oled")]
+        for label, action in actions:
+            self._items.append({"type": "action", "label": label, "detail": "Action", "action": action})
+        # Models
+        mx = self._hw.max_model_gb()
+        for m in MODEL_DB:
+            fits = "Fits" if m.get("gb", 0) <= mx else "Too large"
+            self._items.append({"type": "model", "label": f"{m['n']}  ({m['gb']}GB, {m['q']})",
+                                "detail": f"{m['cat']} · {fits}", "model": m})
+
+    def _filter(self, text):
+        self._list.clear()
+        q = text.lower().strip()
+        for item in self._items:
+            if q and q not in item["label"].lower() and q not in item.get("detail","").lower():
+                continue
+            li = QListWidgetItem(f"{item['label']}   [{item['detail']}]")
+            li.setData(Qt.ItemDataRole.UserRole, item)
+            self._list.addItem(li)
+        if self._list.count() > 0:
+            self._list.setCurrentRow(0)
+
+    def _activate(self, item):
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not data: return
+        if data["type"] == "page":
+            self.sig_navigate.emit(data["idx"])
+        elif data["type"] == "action":
+            self.sig_action.emit(data["action"])
+        elif data["type"] == "model":
+            self.sig_navigate.emit(1)  # Go to models page
+        self.accept()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.reject()
+        elif event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            cur = self._list.currentItem()
+            if cur: self._activate(cur)
+        elif event.key() == Qt.Key.Key_Down:
+            r = self._list.currentRow()
+            if r < self._list.count() - 1: self._list.setCurrentRow(r + 1)
+        elif event.key() == Qt.Key.Key_Up:
+            r = self._list.currentRow()
+            if r > 0: self._list.setCurrentRow(r - 1)
+        else:
+            super().keyPressEvent(event)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # MAIN WINDOW — SIDEBAR NAVIGATION
 # ═══════════════════════════════════════════════════════════════════════════════
 class SidebarNav(QWidget):
@@ -1942,10 +2104,30 @@ class MainWindow(QMainWindow):
         ml.addWidget(sb)
         # Toast parent
         ToastManager.inst().set_parent(cw)
+        # Command palette shortcut (Ctrl+K)
+        from PyQt6.QtGui import QShortcut, QKeySequence
+        self._cmd_shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
+        self._cmd_shortcut.activated.connect(self._show_command_palette)
+        # Ctrl+K hint in status bar
+        self._cmd_hint = QLabel(f"<span style='color:{t['tx3']};font-size:11px'>Ctrl+K</span>")
+        sbl.addWidget(self._cmd_hint)
         # Background model database update
         self._model_updater = ModelUpdateWorker()
         self._model_updater.sig_updated.connect(self._on_models_updated)
         self._model_updater.start()
+
+    def _show_command_palette(self):
+        dlg = CommandPalette(self._hw, self)
+        dlg.sig_navigate.connect(self._go_page)
+        dlg.sig_action.connect(self._run_action)
+        dlg.exec()
+
+    def _run_action(self, action):
+        if action == "refresh_hw": self._refresh_hw()
+        elif action == "copy_profile": self._export_profile()
+        elif action == "theme_obsidian": self._theme("Obsidian")
+        elif action == "theme_catppuccin": self._theme("Catppuccin Mocha")
+        elif action == "theme_oled": self._theme("OLED Black")
 
     def _go_page(self, idx):
         self._stack.setCurrentIndex(idx)
