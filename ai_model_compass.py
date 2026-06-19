@@ -600,7 +600,7 @@ class DownloadWorker(QThread):
     def run(self):
         try:
             self.sig_status.emit(f"Downloading {self.fn}...")
-            path = hf_hub_download(repo_id=self.repo, filename=self.fn, local_dir=self.dest)
+            path = hf_hub_download(repo_id=self.repo, filename=self.fn, local_dir=self.dest, resume_download=True)
             if self._cancel: return
             self.sig_done.emit(str(path))
         except Exception as e: self.sig_err.emit(str(e))
@@ -665,6 +665,12 @@ class HFFilesWorker(QThread):
             api = HfApi(); files = api.list_repo_files(self.repo_id)
             info = api.model_info(self.repo_id, files_metadata=True)
             size_map = {f.rfilename: f.size for f in (info.siblings or []) if f.size}
+            sha_map = {}
+            for f in (info.siblings or []):
+                if hasattr(f, 'lfs') and f.lfs and hasattr(f.lfs, 'sha256'):
+                    sha_map[f.rfilename] = f.lfs.sha256
+                elif hasattr(f, 'blob_id'):
+                    sha_map[f.rfilename] = f.blob_id or ""
             gguf_files = []
             for f in files:
                 if f.endswith(".gguf"):
@@ -673,7 +679,8 @@ class HFFilesWorker(QThread):
                               "iq4_xs","iq4_nl","iq3_m","iq3_s","iq2_m","iq1_s","f16","bf16"]:
                         if q in fl: quant = q.upper(); break
                     sz = size_map.get(f, 0)
-                    gguf_files.append({"name": f, "quant": quant, "size": sz})
+                    sha = sha_map.get(f, "")
+                    gguf_files.append({"name": f, "quant": quant, "size": sz, "sha256": sha})
             self.sig_files.emit(self.repo_id, gguf_files)
         except Exception as e: self.sig_err.emit(str(e))
 
@@ -1588,9 +1595,17 @@ class HFSearchPage(QWidget):
                         fr = QHBoxLayout(); ql = f["quant"]
                         qc = t['gn'] if ql in ("Q4_K_M","Q5_K_M","Q6_K") else t['og'] if "Q3" in ql or "Q4" in ql else t['tx2']
                         sz_str = f" ({f['size']/(1024**3):.1f} GB)" if f.get('size') else ""
+                        sha = f.get("sha256", "")
+                        sha_short = f"  <span style='color:{t['tx3']};font-size:9px'>sha256:{sha[:12]}...</span>" if sha else ""
                         fr.addWidget(QLabel(f"<span style='color:{qc};font-weight:bold;font-size:11px'>{ql}</span> "
-                            f"<span style='color:{t['tx2']};font-size:11px'>{html_mod.escape(f['name'])}{sz_str}</span>"))
+                            f"<span style='color:{t['tx2']};font-size:11px'>{html_mod.escape(f['name'])}{sz_str}</span>{sha_short}"))
                         fr.addStretch()
+                        if sha:
+                            cpb = QPushButton("#"); cpb.setFixedSize(22, 22); cpb.setToolTip(f"Copy SHA256: {sha}")
+                            cpb.setStyleSheet(f"QPushButton{{background:{t['bg3']};color:{t['tx2']};font-size:9px;border-radius:4px;padding:0;}}QPushButton:hover{{background:{t['bg4']};}}")
+                            sha_val = sha
+                            cpb.clicked.connect(lambda _, s=sha_val: (QApplication.clipboard().setText(s), toast(f"SHA256 copied: {s[:20]}...")))
+                            fr.addWidget(cpb)
                         db = QPushButton("⬇"); db.setFixedSize(30, 22)
                         db.setStyleSheet(f"QPushButton{{background:{t['gn']};color:{t['bg0']};font-size:10px;border-radius:4px;font-weight:bold;padding:0;}}")
                         fn = f["name"]; rid = repo_id
